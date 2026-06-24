@@ -1,0 +1,377 @@
+"""
+Smart Invoice Agent — Multi-Agent Workflow (ADK 2.2.0)
+=======================================================
+Graph:
+  START → security_checkpoint ──PROCEED──► extractor_node
+                               └─SECURITY_EVENT─► security_block_node
+          extractor_node ──────────────────────► validator_node
+          validator_node ──────────────────────► approval_node
+          approval_node ──NEEDS_REVIEW──────────► human_review_node
+                        └─AUTO_APPROVE──────────► final_output_node
+          human_review_node ───────────────────► final_output_node
+          security_block_node ─────────────────► final_output_node
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import sys
+
+from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
+from google.adk.tools.mcp_tool import McpToolset, StdioConnectionParams
+from google.adk.workflow import START, Edge, Workflow, node
+from mcp import StdioServerParameters
+
+from app.config import config
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP connection params (stdio transport, local mcp_server.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MCP_SERVER_PATH = os.path.join(os.path.dirname(__file__), "mcp_server.py")
+
+_MCP_CONNECTION = StdioConnectionParams(
+    server_params=StdioServerParameters(
+        command=sys.executable,
+        args=[_MCP_SERVER_PATH],
+        env=None,
+    )
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PII_PATTERNS = [
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[SSN_REDACTED]"),
+    (re.compile(r"\b(?:\d[ -]?){13,16}\b"), "[CARD_REDACTED]"),
+    (re.compile(r"\b[A-Z]{2}\d{6,9}\b"), "[PASSPORT_REDACTED]"),
+    (re.compile(r"\b\d{9,18}\b"), "[BANK_ACCT_REDACTED]"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}"), "[EMAIL_REDACTED]"),
+]
+
+_INJECTION_KEYWORDS = [
+    "ignore previous instructions",
+    "disregard all prior",
+    "you are now",
+    "act as",
+    "jailbreak",
+    "system prompt",
+    "forget everything",
+    "new instructions",
+    "override",
+]
+
+
+def _scrub_pii(text: str) -> tuple[str, list[str]]:
+    redacted: list[str] = []
+    for pattern, replacement in _PII_PATTERNS:
+        if pattern.search(text):
+            redacted.append(replacement)
+            text = pattern.sub(replacement, text)
+    return text, redacted
+
+
+def _detect_injection(text: str) -> list[str]:
+    lower = text.lower()
+    return [kw for kw in _INJECTION_KEYWORDS if kw in lower]
+
+
+def _audit_log(event_type: str, severity: str, details: dict) -> None:
+    entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "event": event_type,
+        "severity": severity,
+        "details": details,
+    }
+    print(f"[AUDIT] {json.dumps(entry)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow Function Nodes  (receive ctx: Context; return route string)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@node
+async def security_checkpoint(ctx: Context) -> str:
+    """Scrubs PII, detects prompt injection, emits audit log. Returns route."""
+    raw_input = ctx.state.get("invoice_raw", "")
+
+    cleaned, redacted_fields = _scrub_pii(raw_input)
+    if redacted_fields:
+        ctx.state["invoice_raw"] = cleaned
+        _audit_log("PII_REDACTED", "WARNING", {
+            "fields_redacted": redacted_fields,
+            "invoice_snippet": cleaned[:120],
+        })
+
+    injections = _detect_injection(raw_input)
+    if injections:
+        _audit_log("INJECTION_DETECTED", "CRITICAL", {
+            "keywords_found": injections,
+            "input_snippet": raw_input[:120],
+        })
+        ctx.state["security_block_reason"] = (
+            f"Injection keywords detected: {injections}"
+        )
+        return "SECURITY_EVENT"
+
+    if not re.search(r"\$[\d,]+|\d+\.\d{2}", raw_input):
+        _audit_log("INVALID_INVOICE_FORMAT", "WARNING", {
+            "reason": "No monetary amount found in input",
+        })
+
+    _audit_log("SECURITY_CHECK_PASSED", "INFO", {
+        "pii_redacted": bool(redacted_fields),
+    })
+    return "PROCEED"
+
+
+@node
+async def extractor_node(ctx: Context) -> str:
+    """Run ExtractorAgent (via ctx.run_node) with MCP tools."""
+    invoice_raw = ctx.state.get("invoice_raw", "")
+
+    async with McpToolset(connection_params=_MCP_CONNECTION) as mcp_tools:
+        agent = LlmAgent(
+            name="ExtractorAgent",
+            model=config.model,
+            instruction=(
+                "You are an invoice data extraction specialist.\n"
+                "Given raw invoice text, use the 'parse_invoice' MCP tool to extract "
+                "structured fields: vendor_name, invoice_number, invoice_date, due_date, "
+                "po_number, line_items (list), subtotal, tax, total_amount, currency.\n"
+                "Return ONLY a valid JSON object with these fields. "
+                "If a field is missing, use null. Never fabricate data."
+            ),
+            tools=await mcp_tools.get_tools(),
+        )
+        extracted_text = await ctx.run_node(
+            agent,
+            f"Extract all invoice data from this text:\n\n{invoice_raw}",
+        )
+
+    extracted_text = extracted_text or ""
+    try:
+        clean = re.sub(r"```(?:json)?|```", "", str(extracted_text)).strip()
+        ctx.state["invoice_extracted"] = json.loads(clean)
+    except (json.JSONDecodeError, Exception):
+        ctx.state["invoice_extracted"] = {"raw_extraction": str(extracted_text)}
+
+    _audit_log("EXTRACTION_COMPLETE", "INFO", {
+        "fields": list(ctx.state["invoice_extracted"].keys()),
+    })
+    return "EXTRACTED"
+
+
+@node
+async def validator_node(ctx: Context) -> str:
+    """Run ValidatorAgent (via ctx.run_node) with MCP tools."""
+    extracted = ctx.state.get("invoice_extracted", {})
+
+    async with McpToolset(connection_params=_MCP_CONNECTION) as mcp_tools:
+        agent = LlmAgent(
+            name="ValidatorAgent",
+            model=config.model,
+            instruction=(
+                "You are an invoice validation specialist.\n"
+                "Given extracted invoice data (JSON), use 'lookup_purchase_order' to "
+                "fetch the matching PO, then 'validate_invoice_against_po' to check:\n"
+                "- PO number match\n- Amount within tolerance (±5%)\n"
+                "- Vendor name match\n- Due date is not past-due.\n"
+                'Return JSON: {"valid": bool, "issues": [...], '
+                '"risk_level": "LOW"|"MEDIUM"|"HIGH"}'
+            ),
+            tools=await mcp_tools.get_tools(),
+        )
+        validation_text = await ctx.run_node(
+            agent,
+            f"Validate this extracted invoice data:\n\n"
+            f"{json.dumps(extracted, indent=2)}",
+        )
+
+    validation_text = validation_text or ""
+    try:
+        clean = re.sub(r"```(?:json)?|```", "", str(validation_text)).strip()
+        ctx.state["validation_result"] = json.loads(clean)
+    except (json.JSONDecodeError, Exception):
+        ctx.state["validation_result"] = {
+            "raw_validation": str(validation_text),
+            "valid": False,
+            "risk_level": "HIGH",
+        }
+
+    risk = ctx.state["validation_result"].get("risk_level", "UNKNOWN")
+    _audit_log("VALIDATION_COMPLETE", "INFO", {
+        "risk_level": risk,
+        "valid": ctx.state["validation_result"].get("valid"),
+    })
+    return "VALIDATED"
+
+
+@node
+async def approval_node(ctx: Context) -> str:
+    """Run ApprovalAgent (via ctx.run_node) — returns AUTO_APPROVE or NEEDS_REVIEW."""
+    validation = ctx.state.get("validation_result", {})
+    extracted = ctx.state.get("invoice_extracted", {})
+
+    agent = LlmAgent(
+        name="ApprovalAgent",
+        model=config.model,
+        instruction=(
+            "You are an invoice approval decision agent.\n"
+            "Given the validation result JSON, apply these rules:\n"
+            '- risk_level == "LOW" and valid == true → AUTO_APPROVE\n'
+            '- risk_level == "MEDIUM" → NEEDS_REVIEW\n'
+            '- risk_level == "HIGH" or valid == false → NEEDS_REVIEW\n'
+            "- total_amount > 50000 → always NEEDS_REVIEW\n"
+            'Return ONLY JSON: {"decision": "AUTO_APPROVE"|"NEEDS_REVIEW", "reason": "..."}'
+        ),
+    )
+    payload = {
+        "validation": validation,
+        "total_amount": extracted.get("total_amount"),
+        "currency": extracted.get("currency", "USD"),
+    }
+    decision_text = await ctx.run_node(
+        agent,
+        f"Make an approval decision for:\n\n{json.dumps(payload, indent=2)}",
+    )
+
+    decision_text = decision_text or ""
+    try:
+        clean = re.sub(r"```(?:json)?|```", "", str(decision_text)).strip()
+        ctx.state["approval_decision"] = json.loads(clean)
+    except (json.JSONDecodeError, Exception):
+        ctx.state["approval_decision"] = {
+            "decision": "NEEDS_REVIEW",
+            "reason": str(decision_text),
+        }
+
+    decision = ctx.state["approval_decision"].get("decision", "NEEDS_REVIEW")
+    _audit_log("APPROVAL_DECISION", "INFO", {
+        "decision": decision,
+        "reason": ctx.state["approval_decision"].get("reason"),
+    })
+    return decision  # "AUTO_APPROVE" or "NEEDS_REVIEW"
+
+
+@node
+async def human_review_node(ctx: Context) -> str:
+    """HITL: pause and ask the human reviewer to APPROVE or REJECT."""
+    from google.adk.tools.request_input import RequestInput  # long-running tool
+
+    extracted = ctx.state.get("invoice_extracted", {})
+    validation = ctx.state.get("validation_result", {})
+    approval = ctx.state.get("approval_decision", {})
+
+    summary = (
+        "INVOICE REVIEW REQUIRED\n"
+        f"Vendor: {extracted.get('vendor_name', 'Unknown')}\n"
+        f"Amount: {extracted.get('total_amount')} {extracted.get('currency', 'USD')}\n"
+        f"PO#: {extracted.get('po_number', 'N/A')}\n"
+        f"Issues: {', '.join(validation.get('issues', [])) or 'None'}\n"
+        f"Risk: {validation.get('risk_level', 'UNKNOWN')}\n"
+        f"Agent Reason: {approval.get('reason', '')}\n\n"
+        "Type APPROVE or REJECT:"
+    )
+
+    # request_input is a LongRunningFunctionTool; invoke via ctx.run_node
+    ri = RequestInput(message=summary)
+    human_response = await ctx.run_node(ri, {"message": summary})
+
+    ctx.state["human_decision"] = str(human_response or "").strip().upper()
+    _audit_log("HUMAN_REVIEW_COMPLETE", "INFO", {
+        "human_decision": ctx.state["human_decision"],
+        "vendor": extracted.get("vendor_name"),
+    })
+    return "REVIEWED"
+
+
+@node
+async def security_block_node(ctx: Context) -> str:
+    """Terminal node: record BLOCKED result."""
+    reason = ctx.state.get("security_block_reason", "Security policy violation")
+    ctx.state["final_result"] = {
+        "status": "BLOCKED",
+        "reason": reason,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    _audit_log("INVOICE_BLOCKED", "CRITICAL", {"reason": reason})
+    return "DONE"
+
+
+@node
+async def final_output_node(ctx: Context) -> str:
+    """Assembles and prints the structured final result."""
+    extracted = ctx.state.get("invoice_extracted", {})
+    validation = ctx.state.get("validation_result", {})
+    approval = ctx.state.get("approval_decision", {})
+    human_decision = ctx.state.get("human_decision")
+
+    if human_decision:
+        status = "APPROVED" if human_decision == "APPROVE" else "REJECTED"
+        final_decision = f"HUMAN_{status}"
+    else:
+        final_decision = approval.get("decision", "AUTO_APPROVE")
+
+    ctx.state["final_result"] = {
+        "status": final_decision,
+        "vendor": extracted.get("vendor_name"),
+        "invoice_number": extracted.get("invoice_number"),
+        "amount": extracted.get("total_amount"),
+        "currency": extracted.get("currency", "USD"),
+        "risk_level": validation.get("risk_level"),
+        "issues": validation.get("issues", []),
+        "reason": approval.get("reason", ""),
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+
+    _audit_log("INVOICE_PROCESSED", "INFO", ctx.state["final_result"])
+    print(f"\n{'='*60}")
+    print(f"INVOICE RESULT: {json.dumps(ctx.state['final_result'], indent=2)}")
+    print(f"{'='*60}\n")
+    return "DONE"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow Graph  (ADK 2.2.0 Edge-based definition)
+# ─────────────────────────────────────────────────────────────────────────────
+
+root_agent = Workflow(
+    name="InvoiceProcessingWorkflow",
+    description=(
+        "Processes invoices through security checks, extraction, validation, "
+        "approval, and optional human review."
+    ),
+    edges=[
+        # START → security_checkpoint (unconditional)
+        (START, security_checkpoint),
+
+        # security_checkpoint → conditional fan-out
+        (security_checkpoint, {
+            "PROCEED": extractor_node,
+            "SECURITY_EVENT": security_block_node,
+        }),
+
+        # linear pipeline
+        (extractor_node, validator_node),
+        (validator_node, approval_node),
+
+        # approval → conditional fan-out
+        (approval_node, {
+            "AUTO_APPROVE": final_output_node,
+            "NEEDS_REVIEW": human_review_node,
+        }),
+
+        # converge on final_output_node
+        (human_review_node, final_output_node),
+        (security_block_node, final_output_node),
+    ],
+)
+
+# ADK web / playground also looks for `app` as an alias
+app = root_agent
