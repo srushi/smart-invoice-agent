@@ -153,6 +153,12 @@ graph TD
 
 ---
 
+## Demo Script
+
+A conversational 3-4 minute presentation narration script is available in [DEMO_SCRIPT.txt](DEMO_SCRIPT.txt) to guide you through presenting or recording the agent's workflow.
+
+---
+
 ## Push to GitHub
 
 1. Create a new repo at https://github.com/new

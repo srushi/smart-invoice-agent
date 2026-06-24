@@ -1,0 +1,46 @@
+[0:00 — HOOK]
+Hello everyone. Processing accounts payable invoices is one of the most tedious, error-prone, and risky tasks in finance operations today. That is why we built the Smart Invoice Agent—an intelligent, multi-agent assistant designed to automate invoice processing securely and reliably.
+
+[0:20 — WHAT IT IS]
+The Smart Invoice Agent falls under the Agents for Business track. It combines multi-agent workflows, Model Context Protocol tools, and a robust security gateway to parse invoices, cross-check them against Purchase Orders, and manage approvals.
+
+(pause)
+
+[0:40 — SHOW THE BANNER]
+(show assets/cover_page_banner.png)
+As you can see on our cover banner, the agent focuses on three main principles: Automated validation, Secure checkpoints, and Intelligent decision routing.
+
+[1:00 — ARCHITECTURE]
+(show assets/architecture_diagram.png)
+Let's walk through the architecture diagram to see how data flows. 
+First, the raw invoice text enters the "security_checkpoint" node, which acts as our security gatekeeper.
+If any prompt injection keyword is found, the workflow routes to the "security_block_node" and stops immediately.
+Otherwise, the raw text proceeds to the "extractor_node", where our ExtractorAgent uses the "parse_invoice" MCP tool to extract structured data.
+Next, the "validator_node" runs our ValidatorAgent, which pulls internal records using the "lookup_purchase_order" tool and runs "validate_invoice_against_po" to detect mismatches.
+From there, the "approval_node" runs our ApprovalAgent to decide if the invoice can be auto-approved or if it needs human eyes.
+If review is needed, the workflow routes to the "human_review_node" which pauses the execution for a manual check.
+Finally, the "final_output_node" compiles the decision and prints the audit logs.
+
+(pause)
+
+[2:00 — LIVE DEMO]
+(switch to playground at localhost:18081)
+Let's see this in action with three different scenarios.
+
+For our first test, I am sending a standard low-risk invoice from Acme Supplies Ltd matching Purchase Order PO-2024-001 for 12,500 dollars.
+As you can see, the security checks pass, the ExtractorAgent structures the data, the ValidatorAgent confirms the PO details match perfectly, and the ApprovalAgent automatically issues an "AUTO_APPROVE" status.
+
+Now, let's look at the second scenario. I will send an invoice for TechCore Solutions for 52,000 dollars matching PO-2024-002, which only has 48,000 dollars approved.
+The ValidatorAgent flags two issues: a high total amount and an 8.3 percent price variance.
+The workflow automatically routes to the human review step. In the playground UI, we see the detailed pause summary. I will type "APPROVE" to manually sign off on this variance. The workflow resumes and outputs "HUMAN_APPROVED".
+
+Finally, let's test our security gate. I am sending an invoice containing a prompt injection exploit, attempting to hijack the system.
+The security checkpoint instantly flags the key phrase, blocks the run, and registers a "BLOCKED" status in the audit logs, keeping our downstream agents safe.
+
+[3:00 — SECURITY & MCP]
+This secure gating is powered by our PII scrubbing filters and prompt injection keyword scanners, which record structured JSON audit logs for every single action. 
+Our MCP server bridges the LLM with mock databases to safely fetch real-time PO registries and vendor risk metrics.
+
+[3:30 — IMPACT / CLOSE]
+By combining multi-agent reasoning, secure guardrails, and human-in-the-loop triggers, the Smart Invoice Agent transforms hours of manual finance verification into seconds of secure, verified automation.
+Thank you!
