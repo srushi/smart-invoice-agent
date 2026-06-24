@@ -22,6 +22,7 @@ import sys
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
+from google.adk.events.event import Event
 from google.adk.tools.mcp_tool import McpToolset, StdioConnectionParams
 from google.adk.workflow import START, Edge, Workflow, node
 from mcp import StdioServerParameters
@@ -96,9 +97,13 @@ def _audit_log(event_type: str, severity: str, details: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @node
-async def security_checkpoint(ctx: Context) -> str:
+async def security_checkpoint(ctx: Context) -> Event:
     """Scrubs PII, detects prompt injection, emits audit log. Returns route."""
+    # Retrieve raw input from state or context user content
     raw_input = ctx.state.get("invoice_raw", "")
+    if not raw_input and ctx.user_content and ctx.user_content.parts:
+        raw_input = "".join(part.text for part in ctx.user_content.parts if part.text)
+        ctx.state["invoice_raw"] = raw_input
 
     cleaned, redacted_fields = _scrub_pii(raw_input)
     if redacted_fields:
@@ -117,7 +122,7 @@ async def security_checkpoint(ctx: Context) -> str:
         ctx.state["security_block_reason"] = (
             f"Injection keywords detected: {injections}"
         )
-        return "SECURITY_EVENT"
+        return Event(route="SECURITY_EVENT")
 
     if not re.search(r"\$[\d,]+|\d+\.\d{2}", raw_input):
         _audit_log("INVALID_INVOICE_FORMAT", "WARNING", {
@@ -127,7 +132,7 @@ async def security_checkpoint(ctx: Context) -> str:
     _audit_log("SECURITY_CHECK_PASSED", "INFO", {
         "pii_redacted": bool(redacted_fields),
     })
-    return "PROCEED"
+    return Event(route="PROCEED")
 
 
 @node
@@ -213,7 +218,7 @@ async def validator_node(ctx: Context) -> str:
 
 
 @node
-async def approval_node(ctx: Context) -> str:
+async def approval_node(ctx: Context) -> Event:
     """Run ApprovalAgent (via ctx.run_node) — returns AUTO_APPROVE or NEEDS_REVIEW."""
     validation = ctx.state.get("validation_result", {})
     extracted = ctx.state.get("invoice_extracted", {})
@@ -256,7 +261,7 @@ async def approval_node(ctx: Context) -> str:
         "decision": decision,
         "reason": ctx.state["approval_decision"].get("reason"),
     })
-    return decision  # "AUTO_APPROVE" or "NEEDS_REVIEW"
+    return Event(route=decision)
 
 
 @node
