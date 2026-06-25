@@ -135,12 +135,13 @@ async def security_checkpoint(ctx: Context) -> Event:
     return Event(route="PROCEED")
 
 
-@node
+@node(rerun_on_resume=True)
 async def extractor_node(ctx: Context) -> str:
     """Run ExtractorAgent (via ctx.run_node) with MCP tools."""
     invoice_raw = ctx.state.get("invoice_raw", "")
 
-    async with McpToolset(connection_params=_MCP_CONNECTION) as mcp_tools:
+    mcp_tools = McpToolset(connection_params=_MCP_CONNECTION)
+    try:
         agent = LlmAgent(
             name="ExtractorAgent",
             model=config.model,
@@ -158,6 +159,8 @@ async def extractor_node(ctx: Context) -> str:
             agent,
             f"Extract all invoice data from this text:\n\n{invoice_raw}",
         )
+    finally:
+        await mcp_tools.close()
 
     extracted_text = extracted_text or ""
     try:
@@ -172,12 +175,13 @@ async def extractor_node(ctx: Context) -> str:
     return "EXTRACTED"
 
 
-@node
+@node(rerun_on_resume=True)
 async def validator_node(ctx: Context) -> str:
     """Run ValidatorAgent (via ctx.run_node) with MCP tools."""
     extracted = ctx.state.get("invoice_extracted", {})
 
-    async with McpToolset(connection_params=_MCP_CONNECTION) as mcp_tools:
+    mcp_tools = McpToolset(connection_params=_MCP_CONNECTION)
+    try:
         agent = LlmAgent(
             name="ValidatorAgent",
             model=config.model,
@@ -197,6 +201,8 @@ async def validator_node(ctx: Context) -> str:
             f"Validate this extracted invoice data:\n\n"
             f"{json.dumps(extracted, indent=2)}",
         )
+    finally:
+        await mcp_tools.close()
 
     validation_text = validation_text or ""
     try:
@@ -217,7 +223,7 @@ async def validator_node(ctx: Context) -> str:
     return "VALIDATED"
 
 
-@node
+@node(rerun_on_resume=True)
 async def approval_node(ctx: Context) -> Event:
     """Run ApprovalAgent (via ctx.run_node) — returns AUTO_APPROVE or NEEDS_REVIEW."""
     validation = ctx.state.get("validation_result", {})
@@ -264,10 +270,10 @@ async def approval_node(ctx: Context) -> Event:
     return Event(route=decision)
 
 
-@node
-async def human_review_node(ctx: Context) -> str:
+@node(rerun_on_resume=True)
+async def human_review_node(ctx: Context):
     """HITL: pause and ask the human reviewer to APPROVE or REJECT."""
-    from google.adk.tools.request_input import RequestInput  # long-running tool
+    from google.adk.events.request_input import RequestInput
 
     extracted = ctx.state.get("invoice_extracted", {})
     validation = ctx.state.get("validation_result", {})
@@ -284,16 +290,21 @@ async def human_review_node(ctx: Context) -> str:
         "Type APPROVE or REJECT:"
     )
 
-    # request_input is a LongRunningFunctionTool; invoke via ctx.run_node
-    ri = RequestInput(message=summary)
-    human_response = await ctx.run_node(ri, {"message": summary})
+    # First pass: yield RequestInput to pause the workflow and prompt the user.
+    # On resume, rerun_on_resume=True causes this node to run again with
+    # ctx.resume_inputs populated — we then read the human's answer.
+    if "human_review" not in ctx.resume_inputs:
+        yield RequestInput(interrupt_id="human_review", message=summary)
+        return
 
-    ctx.state["human_decision"] = str(human_response or "").strip().upper()
+    human_response = ctx.resume_inputs.get("human_review", "")
+    ctx.state["human_decision"] = str(human_response).strip().upper()
     _audit_log("HUMAN_REVIEW_COMPLETE", "INFO", {
         "human_decision": ctx.state["human_decision"],
         "vendor": extracted.get("vendor_name"),
     })
-    return "REVIEWED"
+    from google.adk.events.event import Event as _Event
+    yield _Event(output="REVIEWED")
 
 
 @node

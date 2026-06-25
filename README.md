@@ -46,13 +46,13 @@ The workflow processes invoices through a secure, event-driven DAG:
 
 ```mermaid
 graph TD
-    START(Start) --> SecCheck[Security Checkpoint <br/> PII Redaction & Prompt Injection Detection]
-    SecCheck -->|SECURITY_EVENT| SecBlock[Security Block Node]
-    SecCheck -->|PROCEED| ExtNode[Extractor Node <br/> ExtractorAgent + parse_invoice Tool]
-    ExtNode --> ValNode[Validator Node <br/> ValidatorAgent + PO Lookup & Validate Tools]
-    ValNode --> AppNode[Approval Node <br/> ApprovalAgent Decision Logic]
-    AppNode -->|AUTO_APPROVE| Final[Final Output Node]
-    AppNode -->|NEEDS_REVIEW| HITL[Human Review Node <br/> RequestInput Pause]
+    START(Start) --> SecCheck["Security Checkpoint <br/> PII Redaction & Prompt Injection Detection"]
+    SecCheck -->|SECURITY_EVENT| SecBlock["Security Block Node"]
+    SecCheck -->|PROCEED| ExtNode["Extractor Node <br/> ExtractorAgent + parse_invoice Tool"]
+    ExtNode --> ValNode["Validator Node <br/> ValidatorAgent + PO Lookup & Validate Tools"]
+    ValNode --> AppNode["Approval Node <br/> ApprovalAgent Decision Logic"]
+    AppNode -->|AUTO_APPROVE| Final["Final Output Node"]
+    AppNode -->|NEEDS_REVIEW| HITL["Human Review Node <br/> RequestInput Pause"]
     HITL --> Final
     SecBlock --> Final
 ```

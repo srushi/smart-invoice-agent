@@ -17,6 +17,7 @@ from typing import Any
 
 import vertexai
 from dotenv import load_dotenv
+from google.adk.apps import App
 from google.adk.artifacts import GcsArtifactService, InMemoryArtifactService
 from google.cloud import logging as google_cloud_logging
 from vertexai.agent_engines.templates.adk import AdkApp
@@ -59,8 +60,12 @@ class AgentEngineApp(AdkApp):
 
 gemini_location = os.environ.get("GOOGLE_CLOUD_LOCATION")
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
+
+# Wrap the Workflow in an App so Runner can resolve .root_agent
+_app = App(name="app", root_agent=adk_app)
+
 agent_runtime = AgentEngineApp(
-    app=adk_app,
+    app=_app,
     artifact_service_builder=lambda: (
         GcsArtifactService(bucket_name=logs_bucket_name)
         if logs_bucket_name

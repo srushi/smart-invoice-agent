@@ -13,11 +13,22 @@
 # limitations under the License.
 
 import logging
+import os
 
 import pytest
 from google.adk.events.event import Event
 
 from app.agent_runtime_app import AgentEngineApp
+
+# These tests call the live Gemini API + Cloud Logging and require real ADC.
+# Skip locally unless GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC is set.
+_has_real_gcp = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get(
+    "CLOUDSDK_CONFIG"
+)
+_skip_cloud = pytest.mark.skipif(
+    not _has_real_gcp,
+    reason="Skipping cloud integration test: requires real GCP Application Default Credentials",
+)
 
 
 @pytest.fixture
@@ -32,6 +43,7 @@ def agent_app(monkeypatch: pytest.MonkeyPatch) -> AgentEngineApp:
     return agent_runtime
 
 
+@_skip_cloud
 @pytest.mark.asyncio
 async def test_agent_stream_query(agent_app: AgentEngineApp) -> None:
     """
@@ -61,6 +73,7 @@ async def test_agent_stream_query(agent_app: AgentEngineApp) -> None:
     assert has_text_content, "Expected at least one event with text content"
 
 
+@_skip_cloud
 def test_agent_feedback(agent_app: AgentEngineApp) -> None:
     """
     Integration test for the agent feedback functionality.
