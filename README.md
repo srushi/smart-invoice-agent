@@ -13,7 +13,7 @@ Before running this project, ensure you have:
 
 1. Clone this repository (or navigate to your workspace folder):
    ```bash
-   git clone <repo-url>
+   git clone https://github.com/srushi/smart-invoice-agent.git
    cd smart-invoice-agent
    ```
 
@@ -46,15 +46,24 @@ The workflow processes invoices through a secure, event-driven DAG:
 
 ```mermaid
 graph TD
-    START(Start) --> SecCheck["Security Checkpoint <br/> PII Redaction & Prompt Injection Detection"]
-    SecCheck -->|SECURITY_EVENT| SecBlock["Security Block Node"]
-    SecCheck -->|PROCEED| ExtNode["Extractor Node <br/> ExtractorAgent + parse_invoice Tool"]
-    ExtNode --> ValNode["Validator Node <br/> ValidatorAgent + PO Lookup & Validate Tools"]
-    ValNode --> AppNode["Approval Node <br/> ApprovalAgent Decision Logic"]
-    AppNode -->|AUTO_APPROVE| Final["Final Output Node"]
-    AppNode -->|NEEDS_REVIEW| HITL["Human Review Node <br/> RequestInput Pause"]
+    START([Start]) --> SecCheck[Security Checkpoint]
+    SecCheck -- SECURITY_EVENT --> SecBlock[Security Block Node]
+    SecCheck -- PROCEED --> ExtNode[Extractor Node]
+    ExtNode --> ValNode[Validator Node]
+    ValNode --> AppNode[Approval Node]
+    AppNode -- AUTO_APPROVE --> Final[Final Output Node]
+    AppNode -- NEEDS_REVIEW --> HITL[Human Review Node - HITL]
     HITL --> Final
     SecBlock --> Final
+
+    style START fill:#27ae60,color:#fff
+    style SecCheck fill:#2980b9,color:#fff
+    style SecBlock fill:#c0392b,color:#fff
+    style ExtNode fill:#8e44ad,color:#fff
+    style ValNode fill:#8e44ad,color:#fff
+    style AppNode fill:#e67e22,color:#fff
+    style HITL fill:#f39c12,color:#fff
+    style Final fill:#27ae60,color:#fff
 ```
 
 ---
@@ -159,31 +168,9 @@ A conversational 3-4 minute presentation narration script is available in [DEMO_
 
 ---
 
-## Push to GitHub
+## Repository
 
-1. Create a new repo at https://github.com/new
-   - Name: smart-invoice-agent
-   - Visibility: Public or Private
-   - Do NOT initialize with README (you already have one)
+The project is deployed to GitHub:
+👉 **https://github.com/srushi/smart-invoice-agent**
 
-2. In your terminal, navigate into your project folder:
-   ```bash
-   cd smart-invoice-agent
-   git init
-   git add .
-   git commit -m "Initial commit: smart-invoice-agent ADK agent"
-   git branch -M main
-   git remote add origin https://github.com/<your-username>/smart-invoice-agent.git
-   git push -u origin main
-   ```
-
-3. Verify .gitignore includes:
-   ```text
-   .env          ← your API key — must NEVER be pushed
-   .venv/
-   __pycache__/
-   *.pyc
-   .adk/
-   ```
-
-⚠ NEVER push .env to GitHub. Your API key will be exposed publicly.
+> ⚠️ **Security Note:** `.env` contains your API key and is listed in `.gitignore` — it is **never** pushed to GitHub.
