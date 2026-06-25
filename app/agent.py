@@ -92,6 +92,39 @@ def _audit_log(event_type: str, severity: str, details: dict) -> None:
     print(f"[AUDIT] {json.dumps(entry)}")
 
 
+async def _run_node_with_retry(ctx: Context, node, *args, **kwargs):
+    import asyncio
+    import re
+    max_retries = 5
+    delay = 5.0
+    for attempt in range(max_retries):
+        try:
+            return await ctx.run_node(node, *args, **kwargs)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if any(kwd in err_msg for kwd in ["quota", "exhausted", "429", "rate limit", "resource_exhausted"]):
+                if attempt == max_retries - 1:
+                    _audit_log("RATE_LIMIT_FAILED", "ERROR", {"error": str(e)})
+                    raise
+                match = re.search(r"retry in ([\d\.]+)s", str(e), re.IGNORECASE)
+                if not match:
+                    match = re.search(r"retry after ([\d\.]+)s", str(e), re.IGNORECASE)
+                if not match:
+                    match = re.search(r"retry delay':\s*'([\d\.]+)s'", str(e), re.IGNORECASE)
+                
+                wait_time = float(match.group(1)) + 1.0 if match else delay
+                _audit_log("RATE_LIMIT_HIT", "WARNING", {
+                    "attempt": attempt + 1,
+                    "wait_seconds": wait_time,
+                    "error": str(e)[:250]
+                })
+                print(f"[RETRY] Rate limit hit. Waiting {wait_time:.2f}s before retrying (attempt {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(wait_time)
+                delay *= 2
+            else:
+                raise
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Workflow Function Nodes  (receive ctx: Context; return route string)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,7 +188,8 @@ async def extractor_node(ctx: Context) -> str:
             ),
             tools=await mcp_tools.get_tools(),
         )
-        extracted_text = await ctx.run_node(
+        extracted_text = await _run_node_with_retry(
+            ctx,
             agent,
             f"Extract all invoice data from this text:\n\n{invoice_raw}",
         )
@@ -196,7 +230,8 @@ async def validator_node(ctx: Context) -> str:
             ),
             tools=await mcp_tools.get_tools(),
         )
-        validation_text = await ctx.run_node(
+        validation_text = await _run_node_with_retry(
+            ctx,
             agent,
             f"Validate this extracted invoice data:\n\n"
             f"{json.dumps(extracted, indent=2)}",
@@ -247,7 +282,8 @@ async def approval_node(ctx: Context) -> Event:
         "total_amount": extracted.get("total_amount"),
         "currency": extracted.get("currency", "USD"),
     }
-    decision_text = await ctx.run_node(
+    decision_text = await _run_node_with_retry(
+        ctx,
         agent,
         f"Make an approval decision for:\n\n{json.dumps(payload, indent=2)}",
     )
